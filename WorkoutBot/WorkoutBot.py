@@ -8,7 +8,7 @@ import json
 import os.path
 from collections import namedtuple
 
-CLIENT_ID = "TODO: insert your bot client id"
+CLIENT_ID = "NDY2MTc3MTc1MjU1Nzc3Mjkx.DiYTlA.CaQmZrHsNix5GxZF6P3c4cfdIto"
 
 LIST_CATEGORIES = '```Pełna lista kategorii:\n{0}```'
 HELP_TEXT = """```WorkoutBot pozwala na dodawanie treningów a następnie wylosowanie jednego.
@@ -18,16 +18,18 @@ Lista możliwych komend:
     - add {CATEGORY1}...{CATEGORYn}\\n{WORKOUT} - dodaje nowy trening o danych kategoriach
     - get - losuje dowolny trening
     - get {CATEGORY1}...{CATEGORYn} - losuje trening o dowolnej z wybranych kategorii
+    - getgt {RATING} {CATEGORY1}...{CATEGORYn} - losuje trening o trudności >= zadanej i dowolnej z wybranych kategorii
+    - getlt {RATING} {CATEGORY1}...{CATEGORYn} - losuje trening o trudności <= zadanej i dowolnej z wybranych kategorii
     - rate {RATING} - ocenia ostatni trening w skali od 1 (mega lekko) do 5 (najciężej ever)```"""
 UNKNOWN_COMMAND = '```Nieznana komenda {0}, sprawdź pomoc (help)```'
 UNKNOWN_CATEGORY = '```Nieznana kategoria {0}```'
 INVALID_PARAMETERS = '```Niepoprawne parametry komendy {0}.```'
+INVALID_PARAMETER = '```Niepoprawny parametr {0}.```'
 ADDING_WORKOUT = '```Dodaje nowy workout do kategorii {0}```'
-NO_CATEGORY_WORKOUTS = '```Nie ma żadnego workoutu w kategorii {0}```'
-NO_WORKOUTS = '```Nie ma żadnego workoutu```'
+NO_WORKOUTS = '```Nie ma żadnego workoutu spełniającego podane kryteria```'
 USER_RATED = '```Użytkownik {0} już oddał głos na ostatni workout```'
 WORKOUT_RATED = '```Oceniono ostatni workout na {0}```'
-WORKOUT = 'Rating: {1}\n```{0}```'
+WORKOUT = '\n**Ocena**: {1}\n **Kategorie**: {2}\n```{0}```'
 
 Entity = namedtuple('Entity', ['id', 'name'])
 Connection = namedtuple('Connection', ['id1', 'id2'])
@@ -124,22 +126,10 @@ class WorkoutCommands():
     def get(self, parameter):
         category = parameter.lower()
         if parameter == '':
-            return self.getAnyWorkout()
+            return self._getWorkout(lambda workout: True)
 
-        categories = category.split()
-        categoryIds = [cat.id for cat in self.categories if cat.name in categories]
-        if len(categoryIds) < 1:
-            return UNKNOWN_CATEGORY.format(category)
-
-        workouts = self.database.getWorkouts()
-        workoutIds = [connection.id1 for connection in self.database.getConnections() if connection.id2 in categoryIds]
-
-        if len(workoutIds) > 0:
-            workoutId = workoutIds[random.randrange(len(workoutIds))]
-            rating = self.getOverallRating(workoutId)
-            return WORKOUT.format(workouts[workoutId].name, rating) 
-
-        return NO_CATEGORY_WORKOUTS.format(category)
+        workoutIds = self._getWorkoutIdsWithCategories(category)
+        return self._getWorkout(lambda workout: workout.id in workoutIds)
 
     def listCategories(self, parameter):
         message = ''
@@ -148,18 +138,20 @@ class WorkoutCommands():
 
         return LIST_CATEGORIES.format(message);
 
-    def getAnyWorkout(self):
-        workouts = self.database.getWorkouts()
-
-        if len(workouts) == 0:
-            return NO_WORKOUTS
-
-        workoutId = random.randrange(len(workouts))
-        rating = self.getOverallRating(workoutId)
-        return WORKOUT.format(workouts[workoutId].name, rating)
+    def getWithRating(self, parameter, ratingPred):
+        params = parameter.split(' ', 1)
+        rating = self._parseRating(params[0])
+        if (rating < 1 or rating > 5):
+            return INVALID_PARAMETER.format('rate')
+        
+        if len(params) <= 1:
+            return self._getWorkout(lambda workout: ratingPred(self.getOverallRating(workout.id), rating))
+        
+        workoutIds = self._getWorkoutIdsWithCategories(params[1])
+        return self._getWorkout(lambda workout: workout.id in workoutIds and ratingPred(self.getOverallRating(workout.id), rating))
 
     def rate(self, parameter, user):
-        rating = self.parseRating(parameter)
+        rating = self._parseRating(parameter)
         if (rating < 1 or rating > 5):
             return INVALID_PARAMETERS.format('rate')
 
@@ -177,15 +169,38 @@ class WorkoutCommands():
     def getOverallRating(self, workoutId):
         ratings = self.database.getRatings(workoutId)
         if len(ratings) < 1:
-            return '?'
+            return 0.0
         
         return sum([r.rating for r in ratings]) / len(ratings)
 
-    def parseRating(self, parameter):
+    def getWorkoutCategories(self, workoutId):
+        categoryIds = [c.id2 for c in self.database.getConnections() if c.id1 == workoutId]
+        categories = [c.name for c in self.database.getCategories() if c.id in categoryIds]
+        return ', '.join(categories)
+
+    def _getWorkoutIdsWithCategories(self, category):
+        categories = category.split()
+        categoryIds = [cat.id for cat in self.categories if cat.name in categories]
+        if len(categoryIds) < 1:
+            return []
+
+        return [connection.id1 for connection in self.database.getConnections() if connection.id2 in categoryIds]
+
+    def _parseRating(self, parameter):
         try:
             return int(parameter)
         except ValueError:
             return 0
+
+    def _getWorkout(self, predicate):
+        workouts = [w for w in self.database.getWorkouts() if predicate(w)]
+        if len(workouts) == 0:
+            return NO_WORKOUTS
+
+        workout = workouts[random.randrange(len(workouts))]
+        rating = self.getOverallRating(workout.id)
+        categories = self.getWorkoutCategories(workout.id)
+        return WORKOUT.format(workout.name, rating, categories)
 
 class CommandFactory():
     def __init__(self, database):
@@ -195,6 +210,8 @@ class CommandFactory():
             'categories': lambda parameter, user: workout.listCategories(parameter),
             'add': lambda parameter, user: workout.add(parameter),
             'get': lambda parameter, user: workout.get(parameter),
+            'getgt': lambda parameter, user: workout.getWithRating(parameter, lambda r, x: r >= x),
+            'getlt': lambda parameter, user: workout.getWithRating(parameter, lambda r, x: r <= x and r > 0),
             'rate': workout.rate
         }
 
