@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # pip install -U git+https://github.com/Rapptz/discord.py@rewrite#egg=discord.py[voice]
 import discord
 import asyncio
@@ -16,18 +17,21 @@ Lista możliwych komend:
     - categories - wyświetla pełną listę kategorii treningów
     - add {CATEGORY1}...{CATEGORYn}\\n{WORKOUT} - dodaje nowy trening o danych kategoriach
     - get - losuje dowolny trening
-    - get {CATEGORY1}...{CATEGORYn} - losuje trening o dowolnej z wybranych kategorii```"""
+    - get {CATEGORY1}...{CATEGORYn} - losuje trening o dowolnej z wybranych kategorii
+    - rate {RATING} - ocenia ostatni trening w skali od 1 (mega lekko) do 5 (najciężej ever)```"""
 UNKNOWN_COMMAND = '```Nieznana komenda {0}, sprawdź pomoc (help)```'
 UNKNOWN_CATEGORY = '```Nieznana kategoria {0}```'
 INVALID_PARAMETERS = '```Niepoprawne parametry komendy {0}.```'
 ADDING_WORKOUT = '```Dodaje nowy workout do kategorii {0}```'
 NO_CATEGORY_WORKOUTS = '```Nie ma żadnego workoutu w kategorii {0}```'
 NO_WORKOUTS = '```Nie ma żadnego workoutu```'
-
-WORKOUTS_FILE_NAME = 'workouts.json'
+USER_RATED = '```Użytkownik {0} już oddał głos na ostatni workout```'
+WORKOUT_RATED = '```Oceniono ostatni workout na {0}```'
+WORKOUT = 'Rating: {1}\n```{0}```'
 
 Entity = namedtuple('Entity', ['id', 'name'])
 Connection = namedtuple('Connection', ['id1', 'id2'])
+Rating = namedtuple('Rating', ['workoutId', 'user', 'rating'])
 
 def wasUserMentioned(self, user):
     return user.id in [mention.id for mention in self.mentions]
@@ -41,26 +45,40 @@ del(wasUserMentioned)
 del(getMessageWithoutMention)
 
 class JsonDatabase():
+    CONNECTIONS = 'data\\workout_categories.json'
+    CATEGORIES = 'data\\categories.json'
+    RATINGS = 'data\\ratings.json'
+    WORKOUTS = 'data\\workouts.json'
+
     def getCategories(self):
-        return self._loadEntities('data\\categories.json')
+        return self._loadEntities(self.CATEGORIES)
 
     def getWorkouts(self):
-        return self._loadEntities('data\\workouts.json')
+        return self._loadEntities(self.WORKOUTS)
 
     def getConnections(self):
-        return self._loadConnections('data\\workout_categories.json')
+        return self._loadConnections(self.CONNECTIONS)
+
+    def getRatings(self, workoutId):
+        ratings = self._loadRatings(self.RATINGS)
+        return [r for r in ratings if r.workoutId == workoutId]
 
     def saveWorkout(self, workout, workoutCategories):
         workouts = self.getWorkouts()
         workoutId = len(workouts)
         workouts.append(Entity(workoutId, workout))
-        self._save('data\\workouts.json', workouts)
+        self._save(self.WORKOUTS, workouts)
 
         connections = self.getConnections()
         categories = self.getCategories()
 
         newConnections = [Connection(workoutId, category.id) for category in workoutCategories]
-        self._save('data\\workout_categories.json', connections + newConnections)
+        self._save(self.CONNECTIONS, connections + newConnections)
+
+    def saveRating(self, workoutId, user, rating):
+        ratings = self._loadRatings(self.RATINGS)
+        ratings.append(Rating(workoutId, user, rating))
+        self._save(self.RATINGS, ratings)
 
     def _save(self, fileName, data):
         with open(fileName, 'w') as outfile:
@@ -72,16 +90,17 @@ class JsonDatabase():
     def _loadConnections(self, fileName):
         return self._loadObjectList(fileName, Connection._make) or []
 
+    def _loadRatings(self, fileName):
+        return self._loadObjectList(fileName, Rating._make) or []
+
     def _loadObjectList(self, fileName, objectFactory):
         if os.path.exists(fileName) and os.path.isfile(fileName):
             with open(fileName, 'r') as infile:
                 return [objectFactory(data) for data in json.load(infile)]
 
 class WorkoutCommands():
-    def __init__(self, fileName, database):
+    def __init__(self, database):
         self.database = database
-        self.fileName = fileName
-
         self.categories = database.getCategories()
 
     def add(self, parameter):
@@ -116,8 +135,9 @@ class WorkoutCommands():
         workoutIds = [connection.id1 for connection in self.database.getConnections() if connection.id2 in categoryIds]
 
         if len(workoutIds) > 0:
-            workoutId = random.randrange(len(workoutIds))
-            return '```{0}```'.format(workouts[workoutIds[workoutId]].name)
+            workoutId = workoutIds[random.randrange(len(workoutIds))]
+            rating = self.getOverallRating(workoutId)
+            return WORKOUT.format(workouts[workoutId].name, rating) 
 
         return NO_CATEGORY_WORKOUTS.format(category)
 
@@ -135,16 +155,47 @@ class WorkoutCommands():
             return NO_WORKOUTS
 
         workoutId = random.randrange(len(workouts))
-        return '```{0}```'.format(workouts[workoutId].name)
+        rating = self.getOverallRating(workoutId)
+        return WORKOUT.format(workouts[workoutId].name, rating)
+
+    def rate(self, parameter, user):
+        rating = self.parseRating(parameter)
+        if (rating < 1 or rating > 5):
+            return INVALID_PARAMETERS.format('rate')
+
+        workouts = self.database.getWorkouts()
+        if len(workouts) == 0:
+            return NO_WORKOUTS
+
+        ratings = self.database.getRatings(workouts[-1].id)
+        if next((r for r in ratings if r.user == user), None) != None:
+            return USER_RATED.format(user)
+
+        self.database.saveRating(workouts[-1].id, user, rating)
+        return WORKOUT_RATED.format(rating)
+
+    def getOverallRating(self, workoutId):
+        ratings = self.database.getRatings(workoutId)
+        if len(ratings) < 1:
+            return '?'
+        
+        return sum([r.rating for r in ratings]) / len(ratings)
+
+    def parseRating(self, parameter):
+        try:
+            return int(parameter)
+        except ValueError:
+            return 0
 
 class CommandFactory():
-    def __init__(self, fileName, database):
-        workout = WorkoutCommands(fileName, database)
+    def __init__(self, database):
+        workout = WorkoutCommands(database)
         self.commands = {
-            'help': lambda parameter: HELP_TEXT,
-            'categories': workout.listCategories,
-            'add': workout.add,
-            'get': workout.get
+            'help': lambda parameter, user: HELP_TEXT,
+            'categories': lambda parameter, user: workout.listCategories(parameter),
+            'add': lambda parameter, user: workout.add(parameter),
+            'get': lambda parameter, user: workout.get(parameter),
+            'rate': workout.rate
         }
 
     def createCommand(self, command):
@@ -156,7 +207,7 @@ class CommandFactory():
 class WorkoutBot(discord.Client):
     def __init__(self):
         discord.Client.__init__(self)
-        self.commandFactory = CommandFactory(WORKOUTS_FILE_NAME, JsonDatabase())
+        self.commandFactory = CommandFactory(JsonDatabase())
 
     @asyncio.coroutine
     def on_ready(self):
@@ -175,7 +226,7 @@ class WorkoutBot(discord.Client):
             command, parameter = self.parseMessage(message)
             commandHandler = self.commandFactory.createCommand(command)
 
-            await message.channel.send(commandHandler(parameter))
+            await message.channel.send(commandHandler(parameter, message.author.name))
         except:
             traceback.print_exc()
             raise
